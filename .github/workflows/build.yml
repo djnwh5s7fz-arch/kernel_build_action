@@ -1,71 +1,57 @@
-name: Build KernelSU for Redmi K80 Pro
+name: 打包红米 K80 Pro KernelSU 镜像
 
 on:
-  workflow_dispatch: # 保留手动触发按钮，但参数已写死
+  workflow_dispatch: # 手动触发，参数全部写死在下方
   push:
-    branches: [ main ] # 每次你推代码到 main 分支也会自动触发编译
+    branches: [ main ]
 
 env:
-  # ==================== 你的红米 K80 Pro 核心参数配置 ====================
-  KERNEL_SOURCE: 'https://github.com/Diva-Kernel/kernel_msm-6.6' # 👈 如果你换了源码地址，请修改这里
-  KERNEL_SOURCE_BRANCH: 'android15-6.6'                          # 👈 你的内核源码分支名
-  KERNEL_CONFIG: 'gki_defconfig'                                 # 👈 GKI 6.6 内核标准配置文件名
-  KERNEL_VERSION: '6.6'                                          # 👈 你的内核大版本号
-  CLANG_VERSION: 'r522817'                                       # 👈 针对 Android 15 (6.6内核) 最推荐的官方 Clang 版本
-  ENABLE_KSU: 'true'                                             # 👈 强行开启 KernelSU 注入
-  KSU_VERSION: 'main'                                            # 👈 使用 KernelSU 最新主分支代码
-  # =====================================================================
+  # ==================== 写死的参数配置 ====================
+  ANDROID_VERSION: 'android15'     # 你的系统版本
+  KERNEL_VERSION: '6.6'            # 你的内核大版本
+  KSU_VERSION: 'v3.2.4'            # 想要集成的 KernelSU 版本
+  # =======================================================
 
 jobs:
-  build:
-    runs-level: ubuntu-latest
+  patch_boot:
+    runs-on: ubuntu-latest
     steps:
-    - name: 优化虚拟机磁盘空间
-      uses: easimon/maximize-build-space@master
-      with:
-        root-reserve-mb: 4096
-        swap-size-mb: 1024
-        remove-dotnet: 'true'
-        remove-android: 'true'
-        remove-haskell: 'true'
-
     - name: 检出本仓库代码
       uses: actions/checkout@v4
 
-    - name: 安装编译所需依赖环境
+    - name: 安装 magiskboot 等镜像处理工具
       run: |
         sudo apt-get update
-        sudo apt-get install -y bc build-essential libelf-dev ccache flex bison libssl-dev libcrypto++-dev rsync Python3
+        sudo apt-get install -y wget cpio
+        # 下载 magiskboot 工具用于解包和打包
+        wget https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
+        unzip Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d ./
+        mv lib/x86_64/libmagiskboot.so ./magiskboot
+        chmod +x magiskboot
 
-    - name: 下载并配置 Google 官方 Clang 编译器
+    - name: 下载 KernelSU 官方 Android 15 驱动模块
       run: |
-        mkdir -p $GITHUB_WORKSPACE/clang
-        cd $GITHUB_WORKSPACE/clang
-        wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-${{ env.CLANG_VERSION }}.tar.gz
-        tar -zxf clang-${{ env.CLANG_VERSION }}.tar.gz
-        echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
+        wget https://github.com/tiann/KernelSU/releases/download/${{ env.KSU_VERSION }}/${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}_kernelsu.ko -O kernelsu.ko
 
-    - name: 克隆红米 K80 Pro 内核源码
+    - name: 解包、注入并重新打包 init_boot
       run: |
-        git clone --depth=1 -b ${{ env.KERNEL_SOURCE_BRANCH }} ${{ env.KERNEL_SOURCE }} $GITHUB_WORKSPACE/kernel-source
+        # 确保你已经把官方的 init_boot.img 放到了仓库根目录
+        if [ ! -f "init_boot.img" ]; then
+          echo "错误：请先将你手机官方的 init_boot.img 上传到仓库根目录！"
+          exit 1
+        fi
+        
+        # 1. 解包官方镜像
+        ./magiskboot unpack init_boot.img
+        
+        # 2. 将 KernelSU 模块强行打包进 ramdisk
+        ./magiskboot cpio ramdisk.cpio "add 0644 lib/modules/kernelsu.ko kernelsu.ko"
+        
+        # 3. 重新打包生成新镜像
+        ./magiskboot repack init_boot.img ksu_init_boot.img
 
-    - name: 注入 KernelSU 驱动代码
-      if: env.ENABLE_KSU == 'true'
-      run: |
-        cd $GITHUB_WORKSPACE/kernel-source
-        curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s ${{ env.KSU_VERSION }}
-
-    - name: 开始编译内核 (GKI 6.6)
-      run: |
-        cd $GITHUB_WORKSPACE/kernel-source
-        export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
-        make O=out ARCH=arm64 ${{ env.KERNEL_CONFIG }}
-        make -j$(nproc) O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- CC=clang
-
-    - name: 打包编译产物并上传
+    - name: 上传成品镜像
       uses: actions/upload-artifact@v4
       with:
-        name: Redmi-K80Pro-KernelSU-Image
-        path: |
-          kernel-source/out/arch/arm64/boot/Image
-          kernel-source/out/arch/arm64/boot/Image.gz
+        name: Redmi-K80Pro-KernelSU-init_boot
+        path: ksu_init_boot.img
