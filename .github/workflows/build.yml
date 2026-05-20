@@ -1,30 +1,71 @@
-# A simple action usage
-name: Build Kernel
+name: Build KernelSU for Redmi K80 Pro
+
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 保留手动触发按钮，但参数已写死
+  push:
+    branches: [ main ] # 每次你推代码到 main 分支也会自动触发编译
+
+env:
+  # ==================== 你的红米 K80 Pro 核心参数配置 ====================
+  KERNEL_SOURCE: 'https://github.com/Diva-Kernel/kernel_msm-6.6' # 👈 如果你换了源码地址，请修改这里
+  KERNEL_SOURCE_BRANCH: 'android15-6.6'                          # 👈 你的内核源码分支名
+  KERNEL_CONFIG: 'gki_defconfig'                                 # 👈 GKI 6.6 内核标准配置文件名
+  KERNEL_VERSION: '6.6'                                          # 👈 你的内核大版本号
+  CLANG_VERSION: 'r522817'                                       # 👈 针对 Android 15 (6.6内核) 最推荐的官方 Clang 版本
+  ENABLE_KSU: 'true'                                             # 👈 强行开启 KernelSU 注入
+  KSU_VERSION: 'main'                                            # 👈 使用 KernelSU 最新主分支代码
+  # =====================================================================
 
 jobs:
-  Build-Kernel:
-    strategy:
-      fail-fast: false
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
+  build:
+    runs-level: ubuntu-latest
     steps:
-      - name: Build Kernel
-        uses: dabao1955/kernel_build_action@main
-        with:
-          kernel-url: https://github.com/AcmeUI-Devices/android_kernel_xiaomi_cas
-          kernel-dir: msm-4.19
-          kernel-branch: taffy
-          config: cas_defconfig
-          arch: arm64
-          aosp-gcc: true
-          aosp-clang: true
-          ksu: true
-          ksu-version: main
-          android-version: 12
-          aosp-clang-version: r383902
-          disable-lto: true
-          anykernel3: true
+    - name: 优化虚拟机磁盘空间
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: 4096
+        swap-size-mb: 1024
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+
+    - name: 检出本仓库代码
+      uses: actions/checkout@v4
+
+    - name: 安装编译所需依赖环境
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bc build-essential libelf-dev ccache flex bison libssl-dev libcrypto++-dev rsync Python3
+
+    - name: 下载并配置 Google 官方 Clang 编译器
+      run: |
+        mkdir -p $GITHUB_WORKSPACE/clang
+        cd $GITHUB_WORKSPACE/clang
+        wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-${{ env.CLANG_VERSION }}.tar.gz
+        tar -zxf clang-${{ env.CLANG_VERSION }}.tar.gz
+        echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
+
+    - name: 克隆红米 K80 Pro 内核源码
+      run: |
+        git clone --depth=1 -b ${{ env.KERNEL_SOURCE_BRANCH }} ${{ env.KERNEL_SOURCE }} $GITHUB_WORKSPACE/kernel-source
+
+    - name: 注入 KernelSU 驱动代码
+      if: env.ENABLE_KSU == 'true'
+      run: |
+        cd $GITHUB_WORKSPACE/kernel-source
+        curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s ${{ env.KSU_VERSION }}
+
+    - name: 开始编译内核 (GKI 6.6)
+      run: |
+        cd $GITHUB_WORKSPACE/kernel-source
+        export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+        make O=out ARCH=arm64 ${{ env.KERNEL_CONFIG }}
+        make -j$(nproc) O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- CC=clang
+
+    - name: 打包编译产物并上传
+      uses: actions/upload-artifact@v4
+      with:
+        name: Redmi-K80Pro-KernelSU-Image
+        path: |
+          kernel-source/out/arch/arm64/boot/Image
+          kernel-source/out/arch/arm64/boot/Image.gz
